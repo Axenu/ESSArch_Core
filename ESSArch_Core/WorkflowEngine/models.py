@@ -403,8 +403,9 @@ class ProcessTask(Process):
         _('celery id'), max_length=255, null=True, editable=False
     )
     name = models.CharField(max_length=255)
-    status = models.CharField(
-        _('state'), max_length=50, default=celery_states.PENDING,
+    step = models.BooleanField(default=False)
+    _status = models.CharField(
+        db_column='status', max_length=50, default=celery_states.PENDING,
         choices=TASK_STATE_CHOICES
     )
     responsible = models.ForeignKey(
@@ -419,16 +420,14 @@ class ProcessTask(Process):
     )
     hidden = models.BooleanField(editable=False, default=False, db_index=True)
     meta = PickledObjectField(null=True, default=None, editable=False)
-    processstep = models.ForeignKey(
-        'ProcessStep', related_name='tasks', on_delete=models.CASCADE,
-        null=True, blank=True
-    )
-    processstep_pos = models.IntegerField(_('ProcessStep position'), default=0)
+    parent = models.ForeignKey('self', related_name='children', on_delete=models.CASCADE, null=True)
+    parent_pos = models.IntegerField(default=0)
+    parallel = models.BooleanField(default=False)
     attempt = models.UUIDField(default=uuid.uuid4)
     progress = models.IntegerField(default=0)
-    undone = models.BooleanField(default=False)
     undo_type = models.BooleanField(editable=False, default=False)
-    retried = models.BooleanField(default=False)
+    retried = models.ForeignKey('self', related_name='retried_task', on_delete=models.SET_NULL, null=True, default=None)
+    undone = models.ForeignKey('self', related_name='undone_task', on_delete=models.SET_NULL, null=True, default=None)
     information_package = models.ForeignKey(
         'ip.InformationPackage',
         on_delete=models.SET_NULL,
@@ -455,45 +454,112 @@ class ProcessTask(Process):
         full_task_names = [k for k, v in available_tasks()]
 
         # Make sure that the task exists
-        if self.name not in full_task_names:
+        if not self.step and self.name not in full_task_names:
             raise ValidationError("Task '%s' does not exist." % self.name)
 
-    def run(self):
+    @property
+    def status(self):
+        children = self.children.filter(undo_type=False, undone__isnull=True, retried__isnull=True)
+        status = self._status
+
+        if self.undone:
+            if self.retried:
+                self.retried.refresh_from_db()
+                return self.retried.status
+            else:
+                return celery_states.PENDING
+
+        if status == celery_states.FAILURE or not children:
+            return status
+
+        for c in children:
+            cstatus = c.status
+            if cstatus == celery_states.STARTED:
+                status = cstatus
+            if (cstatus == celery_states.PENDING and
+                    status != celery_states.STARTED):
+                status = cstatus
+            if cstatus == celery_states.FAILURE:
+                return cstatus
+
+        return status
+
+    @status.setter
+    def status(self, value):
+        self._status = value
+
+    def run(self, direct=True):
         """
         Runs the task
         """
 
-        t = self._create_task(self.name)
-        return t.apply_async(kwargs={'taskobj': self}, queue=t.queue)
+        func = group if self.parallel else chain
+        children = self.children.all()
+        children_canvas = func(s.run(direct=False) for s in children)
+
+        if not self.step:
+            t = self._create_task(self.name)
+            subtask = t.s(taskobj=self).set(queue=t.queue)
+            workflow = chain(subtask, children_canvas) if children else chain(subtask)
+        else:
+            workflow = children_canvas
+
+        return workflow() if direct else workflow
 
     def run_eagerly(self):
         """
         Runs the task locally (as a "regular" function)
         """
-        t = self._create_task(self.name)
-        return t(taskobj=self, eager=True)
 
-    def undo(self):
+        res = None
+
+        if not self.step:
+            t = self._create_task(self.name)
+            res = t(taskobj=self, eager=True)
+
+        for c in self.children.all():
+            res = c.run_eagerly()
+
+        return res
+
+    def undo(self, only_failed=False, direct=True):
         """
         Undos the task
         """
 
-        t = self._create_task(self.name)
-        return t.apply_async(
-            kwargs={'taskobj': self.create_undo_obj()},
-            queue=t.queue
-        )
+        func = group if self.parallel else chain
+        children = self.children.all()#.filter(time_started__isnull=False)
+        if only_failed:
+            children = children.filter(_status=celery_states.FAILURE)
+        children_canvas = func(s.undo(direct=False) for s in children.reverse())
 
-    def retry(self):
+
+        if not self.step:
+            t = self._create_task(self.name)
+            subtask = t.s(taskobj=self.create_undo_obj()).set(queue=t.queue)
+            workflow = chain(children_canvas, subtask) if children else chain(subtask)
+        else:
+            workflow = children_canvas
+
+        return workflow() if direct else workflow
+
+    def retry(self, direct=True):
         """
         Retries the task
         """
 
-        t = self._create_task(self.name)
-        return t.apply_async(
-            kwargs={'taskobj': self.create_retry_obj()},
-            queue=t.queue
-        )
+        func = group if self.parallel else chain
+        children = self.children.filter(undone__isnull=False, retried__isnull=True)
+        children_canvas = func(s.retry(direct=False) for s in children)
+
+        if not self.step:
+            t = self._create_task(self.name)
+            subtask = t.s(taskobj=self.create_retry_obj()).set(queue=t.queue)
+            workflow = chain(subtask, children_canvas) if children else chain(subtask)
+        else:
+            workflow = children_canvas
+
+        return workflow() if direct else workflow
 
     def create_undo_obj(self, attempt=uuid.uuid4()):
         """
@@ -504,15 +570,16 @@ class ProcessTask(Process):
             attempt: Which attempt the new task belongs to
         """
 
-        self.undone = True
-        self.save()
-
-        return ProcessTask.objects.create(
-            processstep=self.processstep, name="%s undo" % self.name,
-            params=self.params, processstep_pos=self.processstep_pos,
+        self.undone = ProcessTask.objects.create(
+            parent=self.parent, name="%s undo" % self.name,
+            params=self.params, parent_pos=self.parent_pos,
             undo_type=True, attempt=attempt, status="PREPARED",
-            information_package=self.information_package
+            information_package=self.information_package,
+            step=self.step,
         )
+
+        self.save()
+        return self.undone
 
     def create_retry_obj(self, attempt=uuid.uuid4()):
         """
@@ -523,18 +590,19 @@ class ProcessTask(Process):
             attempt: Which attempt the new task belongs to
         """
 
-        self.retried = True
-        self.save()
-
-        return ProcessTask.objects.create(
-            processstep=self.processstep, name=self.name, params=self.params,
-            processstep_pos=self.processstep_pos, attempt=attempt,
+        self.retried = ProcessTask.objects.create(
+            parent=self.parent, name=self.name, params=self.params,
+            parent_pos=self.parent_pos, attempt=attempt,
             status="PREPARED", information_package=self.information_package,
+            step=self.step,
         )
+
+        self.save()
+        return self.retried
 
     class Meta:
         db_table = 'ProcessTask'
-        ordering = ('processstep_pos', 'time_started')
+        ordering = ('parent_pos', 'time_started')
 
         def __unicode__(self):
             return '%s - %s' % (self.name, self.id)

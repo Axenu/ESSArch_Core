@@ -41,6 +41,8 @@ from django.db import (
     OperationalError,
 )
 
+from django.db.models import Q
+
 from django.utils import timezone
 
 from ESSArch_Core.ip.models import EventIP, InformationPackage
@@ -88,7 +90,7 @@ class DBTask(Task):
                 self.taskobj.time_done = timezone.now()
 
                 try:
-                    self.taskobj.save(update_fields=['result', 'status', 'time_done'])
+                    self.taskobj.save(update_fields=['result', '_status', 'time_done'])
                 except DatabaseError:
                     self.taskobj.save()
 
@@ -104,7 +106,7 @@ class DBTask(Task):
                 self.taskobj.time_done = timezone.now()
 
                 try:
-                    self.taskobj.save(update_fields=['einfo', 'status', 'time_done'])
+                    self.taskobj.save(update_fields=['einfo', '_status', 'time_done'])
                 except DatabaseError:
                     self.taskobj.save()
 
@@ -153,11 +155,11 @@ class DBTask(Task):
             try:
                 self.taskobj.status = status
                 self.taskobj.time_done = timezone.now()
-                self.taskobj.save(update_fields=['status', 'time_done'])
+                self.taskobj.save(update_fields=['_status', 'time_done'])
             except OperationalError:
                 print "Database locked, trying again after 2 seconds"
                 time.sleep(2)
-                self.taskobj.save(update_fields=['status', 'time_done'])
+                self.taskobj.save(update_fields=['_status', 'time_done'])
 
     def create_event(self, outcome, outcome_detail_note):
         log = self.taskobj.log
@@ -191,11 +193,6 @@ class DBTask(Task):
             self.taskobj.refresh_from_db()
             self.taskobj.einfo = einfo
             self.taskobj.save(update_fields=['einfo'])
-
-            ProcessTask.objects.filter(
-                attempt=self.taskobj.attempt,
-                processstep_pos__gt=self.taskobj.processstep_pos
-            ).update(status=celery_states.FAILURE)
 
             try:
                 event = self.taskobj.event
