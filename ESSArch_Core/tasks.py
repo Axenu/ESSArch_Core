@@ -556,7 +556,7 @@ class ValidateFiles(DBTask):
         self.set_progress(100, total=100)
 
         with allow_join_result():
-            return step.run().get()
+            return step.run()
 
     def undo(self, ip=None, xmlfile=None, validate_fileformat=True, validate_integrity=True, rootdir=None):
         pass

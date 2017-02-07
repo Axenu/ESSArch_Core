@@ -180,10 +180,10 @@ class ProcessStep(Process):
         child_steps = self.child_steps.all()
         tasks = self.tasks.all()
 
-        step_canvas = func(s.run(direct=False) for s in child_steps)
+        step_canvas = func(s.run(direct=False) for s in child_steps) if child_steps else chain()
         task_canvas = func(self._create_task(t.name).s(
             taskobj=t
-        ).set(task_id=str(t.pk)) for t in tasks)
+        ).set(task_id=str(t.pk)) for t in tasks) if tasks else chain()
 
         if not child_steps:
             workflow = task_canvas
@@ -192,7 +192,10 @@ class ProcessStep(Process):
         else:
             workflow = (step_canvas | task_canvas)
 
-        return workflow() if direct else workflow
+        if type(workflow).__name__ in ['_chain', 'group']:
+            return workflow() if direct else workflow
+        else:
+            return workflow.delay() if direct else workflow
 
     def run_eagerly(self, **kwargs):
         """
@@ -242,8 +245,8 @@ class ProcessStep(Process):
 
         task_canvas = func(self._create_task(t.name).si(
             taskobj=t,
-        ).set(task_id=str(t.pk)) for t in undo_tasks)
-        step_canvas = func(s.undo(direct=False) for s in child_steps.reverse())
+        ).set(task_id=str(t.pk)) for t in undo_tasks) if undo_tasks else chain()
+        step_canvas = func(s.undo(direct=False) for s in child_steps.reverse()) if child_steps else chain()
 
         if not child_steps:
             workflow = task_canvas
@@ -252,7 +255,10 @@ class ProcessStep(Process):
         else:
             workflow = (task_canvas | step_canvas)
 
-        return workflow() if direct else workflow
+        if type(workflow).__name__ in ['_chain', 'group']:
+            return workflow() if direct else workflow
+        else:
+            return workflow.delay() if direct else workflow
 
     def retry(self, direct=True):
         """
@@ -279,12 +285,12 @@ class ProcessStep(Process):
         func = group if self.parallel else chain
         attempt = uuid.uuid4()
 
-        step_canvas = func(s.retry(direct=False) for s in child_steps)
+        step_canvas = func(s.retry(direct=False) for s in child_steps) if child_steps else chain()
 
         retry_tasks = [t.create_retry_obj(attempt=attempt) for t in tasks]
         task_canvas = func(self._create_task(t.name).s(
             taskobj=t,
-        ).set(task_id=str(t.pk)) for t in retry_tasks)
+        ).set(task_id=str(t.pk)) for t in retry_tasks) if retry_tasks else chain()
 
         if not child_steps:
             workflow = task_canvas
@@ -293,7 +299,10 @@ class ProcessStep(Process):
         else:
             workflow = (step_canvas | task_canvas)
 
-        return workflow() if direct else workflow
+        if type(workflow).__name__ in ['_chain', 'group']:
+            return workflow() if direct else workflow
+        else:
+            return workflow.delay() if direct else workflow
 
     def resume(self, direct=True):
         """
@@ -315,8 +324,8 @@ class ProcessStep(Process):
         child_steps = self.child_steps.filter(tasks__status=celery_states.PENDING)
         tasks = self.tasks.filter(undone=False, undo_type=False, status=celery_states.PENDING)
 
-        step_canvas = func(s.run(direct=False) for s in child_steps)
-        task_canvas = func(self._create_task(t.name).s(taskobj=t).set(task_id=str(t.pk)) for t in tasks)
+        step_canvas = func(s.run(direct=False) for s in child_steps) if child_steps else chain()
+        task_canvas = func(self._create_task(t.name).s(taskobj=t).set(task_id=str(t.pk)) for t in tasks) if tasks else chain()
 
         if not child_steps:
             workflow = task_canvas
@@ -325,7 +334,10 @@ class ProcessStep(Process):
         else:
             workflow = (step_canvas | task_canvas)
 
-        return workflow() if direct else workflow
+        if type(workflow).__name__ in ['_chain', 'group']:
+            return workflow() if direct else workflow
+        else:
+            return workflow.delay() if direct else workflow
 
     @property
     def cache_status_key(self):

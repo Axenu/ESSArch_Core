@@ -30,7 +30,9 @@ import time
 
 from billiard.einfo import ExceptionInfo
 
-from celery import states as celery_states, Task
+from celery import states as celery_states
+from celery.result import allow_join_result
+from celery.task.base import Task
 
 from ESSArch_Core.configuration.models import EventType
 
@@ -70,14 +72,13 @@ class DBTask(Task):
 
         self.eager = kwargs.get("eager", False)
 
-        try:
-            prev_result_dict = args[0]
-        except IndexError:
-            prev_result_dict = {}
+        celery_always_eager = hasattr(settings, 'CELERY_ALWAYS_EAGER') and settings.CELERY_ALWAYS_EAGER
+        celery_eager_propagates_exceptions = hasattr(settings, 'CELERY_EAGER_PROPAGATES_EXCEPTIONS') and settings.CELERY_EAGER_PROPAGATES_EXCEPTIONS
 
         if self.taskobj.result_params:
-            for k, v in self.taskobj.result_params.iteritems():
-                self.taskobj.params[k] = prev_result_dict[v]
+            with allow_join_result():
+                for k, v in self.taskobj.result_params.iteritems():
+                    self.taskobj.params[k] = self.AsyncResult(str(v)).get()
 
         self.taskobj.hidden = self.taskobj.hidden or self.hidden
         self.taskobj.status = celery_states.STARTED
@@ -119,15 +120,11 @@ class DBTask(Task):
                 )
                 raise
 
-        celery_always_eager = hasattr(settings, 'CELERY_ALWAYS_EAGER') and settings.CELERY_ALWAYS_EAGER
-        celery_eager_propagates_exceptions = hasattr(settings, 'CELERY_EAGER_PROPAGATES_EXCEPTIONS') and settings.CELERY_EAGER_PROPAGATES_EXCEPTIONS
-
         if self.taskobj.undo_type:
             if celery_always_eager and celery_eager_propagates_exceptions:
                 try:
                     res = self.undo(**self.taskobj.params)
-                    prev_result_dict[self.taskobj.id] = res
-                    self.on_success(prev_result_dict, None, args, kwargs)
+                    self.on_success(res, None, args, kwargs)
                     return res
                 except Exception as e:
                     einfo = ExceptionInfo()
@@ -140,28 +137,23 @@ class DBTask(Task):
             if celery_always_eager and celery_eager_propagates_exceptions:
                 try:
                     res = self.run(**self.taskobj.params)
-                    prev_result_dict[self.taskobj.id] = res
-                    self.on_success(prev_result_dict, None, args, kwargs)
+                    self.on_success(res, None, args, kwargs)
                 except Exception as e:
                     einfo = ExceptionInfo()
                     self.on_failure(e, None, args, kwargs, einfo)
                     self.after_return(celery_states.FAILURE, e, None, args, kwargs, einfo)
                     raise
             else:
-                prev_result_dict[self.taskobj.id] = self.run(**self.taskobj.params)
+                res = self.run(**self.taskobj.params)
 
             self.create_event(None, "")
-            return prev_result_dict
+            return res
 
     def after_return(self, status, retval, task_id, args, kwargs, einfo):
         self.taskobj.refresh_from_db()
         if not self.eager:
             try:
-                try:
-                    self.taskobj.result = retval.get(self.taskobj.pk, None)
-                except AttributeError:
-                    self.taskobj.result = None
-
+                self.taskobj.result = retval
                 self.taskobj.status = status
                 self.taskobj.time_done = timezone.now()
                 self.taskobj.save(update_fields=['status', 'time_done', 'result'])

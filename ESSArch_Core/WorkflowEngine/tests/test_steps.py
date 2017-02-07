@@ -715,9 +715,7 @@ class test_running_steps(TestCase):
 
         self.assertEqual(step.status, celery_states.SUCCESS)
 
-        self.assertEqual(res.get(t1.id), t1_val)
-        self.assertEqual(res.get(t2.id), t2_val)
-        self.assertEqual(res.get(t3.id), t3_val)
+        self.assertEqual(res, t3_val)
 
     def test_parallel_step(self):
         t1_val = 123
