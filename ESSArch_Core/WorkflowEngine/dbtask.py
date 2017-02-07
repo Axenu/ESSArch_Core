@@ -76,9 +76,13 @@ class DBTask(Task):
         celery_eager_propagates_exceptions = hasattr(settings, 'CELERY_EAGER_PROPAGATES_EXCEPTIONS') and settings.CELERY_EAGER_PROPAGATES_EXCEPTIONS
 
         if self.taskobj.result_params:
-            with allow_join_result():
+            if celery_always_eager:
                 for k, v in self.taskobj.result_params.iteritems():
-                    self.taskobj.params[k] = self.AsyncResult(str(v)).get()
+                    self.taskobj.params[k] = ProcessTask.objects.values_list('result', flat=True).get(pk=v)
+            else:
+                with allow_join_result():
+                    for k, v in self.taskobj.result_params.iteritems():
+                        self.taskobj.params[k] = self.AsyncResult(str(v)).get()
 
         self.taskobj.hidden = self.taskobj.hidden or self.hidden
         self.taskobj.status = celery_states.STARTED

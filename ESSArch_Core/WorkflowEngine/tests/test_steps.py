@@ -946,9 +946,9 @@ class test_running_steps(TestCase):
         t2.refresh_from_db()
         t3.refresh_from_db()
 
-        self.assertEqual(res.get(t1.id), t1_val*2)
-        self.assertEqual(res.get(t2.id), res.get(t1.id) + t2_val)
-        self.assertEqual(res.get(t3.id), res.get(t1.id) + t3_val)
+        self.assertEqual(t1.result, t1_val*2)
+        self.assertEqual(t2.result, t1.result + t2_val)
+        self.assertEqual(t3.result, t1.result + t3_val)
 
 
 class test_undoing_steps(TestCase):
